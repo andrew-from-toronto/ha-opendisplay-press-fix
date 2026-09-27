@@ -1,0 +1,16 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        py-opendisplay: ["7.15.0", "7.17.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pytest "py-opendisplay==${{ matrix.py-opendisplay }}"
+      # 7.17 already counts a tap it never saw held; only that one check describes 7.15.
+      - run: pytest -q ${{ matrix.py-opendisplay != '7.15.0' && '-k "not shipped_tracker"' || '' }}
