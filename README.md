@@ -27,7 +27,12 @@ modulo 16 against the last count seen for that button:
 - a late advertisement relayed by a second proxy, whose counter is behind, is ignored instead of read
   as 15 phantom presses;
 - a tag reboot starts a new baseline when its reboot flag first appears. The firmware keeps that flag
-  up until the next BLE connection, and presses made meanwhile still count.
+  up until the next BLE connection, and presses made meanwhile still count;
+- a button showing a count of zero, not held, is never a press. The reboot flag cannot be relied on,
+  because Home Assistant's own setup connection clears it;
+- for 10 seconds after tracking starts, advertisements only set the baseline. After a restart HA replays
+  the advertisement it cached beforehand, and a tag that rebooted in between would otherwise turn that
+  pair into a phantom press.
 
 It patches the class in place, so it is not a copy of the core integration and needs no upkeep when HA
 updates. At startup it checks whether the installed tracker already handles the wrap. If it does, it

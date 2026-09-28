@@ -38,6 +38,12 @@ DOMAIN = "opendisplay_press_fix"
 # larger jump round the 16-count ring is an older advertisement arriving after a newer one.
 MAX_PRESSES = 7
 
+# How long after tracking starts (Home Assistant starting, the integration reloading, the tag rebooting)
+# advertisements only set the baseline. Home Assistant hands the coordinator the last advertisement it
+# cached before a restart, and the first live one follows within a second; measured 2026-09-27, a tag
+# that had rebooted in between turned that pair into a phantom press 260 ms after start-up.
+SETTLE_SECONDS = 10.0
+
 
 def fixed_update(self, address, advertisement, timestamp=None):
     """Process one advertisement and return the button transitions it implies."""
@@ -61,15 +67,20 @@ def fixed_update(self, address, advertisement, timestamp=None):
     rebooted = advertisement.reboot_flag and not flagged.get(address, False)
     flagged[address] = bool(advertisement.reboot_flag)
 
+    now = timestamp if timestamp is not None else time.time()
+    settling = self.__dict__.setdefault("_press_fix_settle_until", {})
+
     if previous is None or len(previous) != len(current) or rebooted:
         for key in [k for k in counts if k[0] == address]:
             del counts[key]
+        settling[address] = now + SETTLE_SECONDS
+
+    if now < settling.get(address, 0.0):
         for curr in current:
             counts[(address, curr.byte_index, curr.button_id)] = curr.press_count
         self._last_by_address[address] = current
         return []
 
-    now = timestamp if timestamp is not None else time.time()
     events = []
 
     for i, (prev, curr) in enumerate(zip(previous, current, strict=False)):
@@ -83,6 +94,15 @@ def fixed_update(self, address, advertisement, timestamp=None):
                 raw=curr.raw, previous_raw=prev.raw, timestamp=now))
 
         key = (address, curr.byte_index, curr.button_id)
+
+        # A count of zero, not held, is a button nothing has pressed since the tag booted. The firmware's
+        # reboot flag cannot be relied on to say so: Home Assistant connects to the tag while setting the
+        # integration up, and that connection clears it before the first advertisement is read. The one
+        # real press this misses - a wrap onto exactly zero that no advertisement caught held - is the
+        # price of never inventing a meal.
+        if curr.press_count == 0 and not curr.pressed and not prev.pressed:
+            counts[key] = 0
+            continue
 
         known = counts.get(key)
         # Unknown only for a button first seen since Home Assistant started, and then only because

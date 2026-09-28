@@ -37,15 +37,26 @@ def adv(value, reboot=False):
 def tracker():
     t = AdvertisementTracker()
     t.update = types.MethodType(fix.fixed_update, t)
+    t.clock = 0.0
     return t
 
 
-def ups(tracker, *values):
-    """button_ids of every button_up across a run of advertisements, the first being the baseline."""
+# Well past the settle window, so each advertisement in a run is a live one after the baseline.
+STEP = 30.0
+
+
+def run(tracker, *values, reboot=False, step=STEP):
+    """button_ids of every button_up across a run of advertisements, each `step` seconds apart."""
     out = []
     for value in values:
-        out += [e.button_id for e in tracker.update(TAG, adv(value), timestamp=0.0) if e.event_type == "button_up"]
+        events = tracker.update(TAG, adv(value, reboot=reboot), timestamp=tracker.clock)
+        tracker.clock += step
+        out += [e.button_id for e in events if e.event_type == "button_up"]
     return out
+
+
+def ups(tracker, *values):
+    return run(tracker, *values)
 
 
 def test_the_shipped_tracker_loses_a_tap_nobody_saw_held():
@@ -63,13 +74,18 @@ def test_a_held_press_is_one_press_not_two(tracker):
 
 
 def test_the_press_that_wraps_the_counter_counts(tracker):
-    # Button 0 at 15 -> 0 is an all-zero byte, the same byte a freshly booted tag sends; the reboot
-    # flag, not the byte, is what tells them apart.
-    assert ups(tracker, byte(0, 15), byte(0, 0)) == [0]
-
-
-def test_a_bounced_press_that_skips_zero_still_wraps(tracker):
     assert ups(tracker, byte(1, 15), byte(1, 1)) == [1]
+
+
+def test_a_wrap_onto_zero_caught_held_still_counts(tracker):
+    assert ups(tracker, byte(0, 15), byte(0, 0, True), byte(0, 0)) == [0]
+
+
+def test_a_zero_count_is_never_a_press(tracker):
+    # The one real press given up: a wrap onto exactly zero that nothing caught held. It reads the same
+    # as a tag that has rebooted, and a missed meal is cheaper than an invented one.
+    assert ups(tracker, byte(0, 15), byte(0, 0)) == []
+    assert ups(tracker, byte(0, 1)) == [0]
 
 
 def test_a_repeat_of_the_same_advertisement_is_nothing(tracker):
@@ -91,32 +107,41 @@ def test_after_a_late_advertisement_the_next_real_press_still_counts(tracker):
     assert ups(tracker, byte(0, 5), byte(0, 4), byte(0, 6)) == [0]
 
 
+def test_the_2026_09_27_phantom_is_not_a_press(tracker):
+    # Home Assistant restarted; the tag had rebooted meanwhile and HA's own setup connection had already
+    # cleared its reboot flag. The coordinator got the advertisement cached from before the restart
+    # (Andrew FED, count 14), then 260 ms later the live one, all zeros.
+    assert run(tracker, byte(0, 14), 0, step=0.26) == []
+
+
+def test_a_cached_advertisement_for_another_button_is_not_a_press_either(tracker):
+    assert run(tracker, byte(1, 5), byte(0, 14), step=0.26) == []
+
+
+def test_after_settling_a_real_press_counts(tracker):
+    assert run(tracker, byte(0, 14), 0, step=0.26) == []
+    tracker.clock += fix.SETTLE_SECONDS
+    assert ups(tracker, byte(2, 1)) == [2]
+
+
 def test_a_reboot_is_a_new_baseline(tracker):
-    tracker.update(TAG, adv(byte(0, 9)))
-    assert not tracker.update(TAG, adv(byte(0, 0), reboot=True), timestamp=0.0)
+    ups(tracker, byte(0, 9))
+    assert run(tracker, byte(0, 0), reboot=True) == []
     assert ups(tracker, byte(0, 1)) == [0]
-
-
-def reboot_run(tracker, *values):
-    out = []
-    for value in values:
-        out += [e.button_id for e in tracker.update(TAG, adv(value, reboot=True), timestamp=0.0)
-                if e.event_type == "button_up"]
-    return out
 
 
 def test_presses_after_a_reboot_count_though_the_flag_stays_up(tracker):
     # The firmware clears the flag only on its next BLE connection, so every advertisement until the
     # next screen push carries it.
-    tracker.update(TAG, adv(byte(2, 9)))
-    assert reboot_run(tracker, 0, 0, byte(0, 1), byte(0, 2)) == [0, 0]
+    ups(tracker, byte(2, 9))
+    assert run(tracker, 0, 0, byte(0, 1), byte(0, 2), reboot=True) == [0, 0]
 
 
 def test_a_reboot_after_a_screen_push_is_seen_again(tracker):
-    tracker.update(TAG, adv(byte(2, 9)))
-    reboot_run(tracker, 0)
+    ups(tracker, byte(2, 9))
+    run(tracker, 0, reboot=True)
     assert ups(tracker, 0, byte(0, 1)) == [0]
-    assert reboot_run(tracker, 0) == []
+    assert run(tracker, 0, reboot=True) == []
 
 
 def test_a_release_missed_before_another_button_still_closes_the_first(tracker):
